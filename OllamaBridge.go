@@ -513,6 +513,7 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 	
 	// 用于收集部分响应
 	var buffer strings.Builder
+	var reasoningBuffer strings.Builder
 	var prevReasoning string
 	var prevContent string
 	
@@ -540,10 +541,6 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 			return
 		}
 		
-		// 尝试适应不同的响应格式
-		var responseText string
-		var isDone bool
-		
 		// 首先尝试OpenAI流式格式
 		var openAIChunk struct {
 			ID      string `json:"id"`
@@ -553,8 +550,9 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 			Choices []struct {
 				Index int `json:"index"`
 				Delta struct {
-					Role    string `json:"role"`
-					Content string `json:"content"`
+					Role             string `json:"role"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
 				} `json:"delta"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
@@ -563,12 +561,36 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 		if err := json.Unmarshal([]byte(line), &openAIChunk); err == nil && 
 			len(openAIChunk.Choices) > 0 {
 			// 是OpenAI格式
-			responseText = openAIChunk.Choices[0].Delta.Content
-			isDone = openAIChunk.Choices[0].FinishReason != ""
-			log.Printf("OpenAI格式解析成功: content=%s, done=%v", 
-				responseText, isDone)
+			contentText := openAIChunk.Choices[0].Delta.Content
+			reasoningText := openAIChunk.Choices[0].Delta.ReasoningContent
+			isDone := openAIChunk.Choices[0].FinishReason != ""
+			
+			log.Printf("OpenAI格式解析成功: content=%s, reasoning_content=%s, done=%v", 
+				contentText, reasoningText, isDone)
+			
+			// 直接发送OpenAI格式的delta（无需额外处理）
+			chunk := createStreamChunk(id, 0, contentText, reasoningText, isDone)
+			data, err := json.Marshal(chunk)
+			if err != nil {
+				log.Printf("序列化响应块失败: %v", err)
+				sendError(w, "生成响应失败: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			
+			log.Printf("发送数据块: content=%d字节, reasoning=%d字节",
+				len(contentText), len(reasoningText))
+			fmt.Fprintf(w, "data: %s\n\n", string(data))
+			flusher.Flush()
+			
+			if isDone {
+				log.Printf("模型指示生成完成，结束流")
+				break
+			}
 		} else {
 			// 尝试标准Ollama格式
+			var responseText string
+			var isDone bool
+			
 			var ollamaResp OllamaResponse
 			if err := json.Unmarshal([]byte(line), &ollamaResp); err == nil {
 				responseText = ollamaResp.Response
@@ -598,57 +620,96 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 					}
 				}
 			}
-		}
-		
-		// 如果提取到响应文本，则处理它
-		if responseText != "" {
-			// 累积响应
-			buffer.WriteString(responseText)
-			fullResponse := buffer.String()
 			
-			// 提取思考链
-			reasoning := extractReasoning(fullResponse, config.ReasoningTags)
-			content := removeReasoningFromContent(fullResponse, config.ReasoningTags)
-			
-			// 只发送差异部分
-			var reasoningDiff, contentDiff string
-			if reasoning != prevReasoning {
-				if prevReasoning == "" {
-					reasoningDiff = reasoning
-				} else {
-					reasoningDiff = strings.TrimPrefix(reasoning, prevReasoning)
-				}
-				prevReasoning = reasoning
-			}
-			
-			if content != prevContent {
-				if prevContent == "" {
-					contentDiff = content
-				} else {
-					contentDiff = strings.TrimPrefix(content, prevContent)
-				}
-				prevContent = content
-			}
-			
-			if contentDiff != "" || reasoningDiff != "" {
-				// 构建流式响应块
-				chunk := createStreamChunk(id, 0, contentDiff, reasoningDiff, isDone)
-				data, err := json.Marshal(chunk)
-				if err != nil {
-					log.Printf("序列化响应块失败: %v", err)
-					sendError(w, "生成响应失败: "+err.Error(), http.StatusInternalServerError)
-					return
+			// 如果提取到响应文本，则处理它
+			if responseText != "" {
+				// 检查是否包含思考链标签
+				var contentForBuffer, reasoningForBuffer string
+				
+				// 首先尝试提取思考链
+				for _, tag := range config.ReasoningTags {
+					openTag := "<" + tag + ">"
+					closeTag := "</" + tag + ">"
+					
+					// 检查是否包含思考链标签
+					if strings.Contains(responseText, openTag) && strings.Contains(responseText, closeTag) {
+						pattern := regexp.MustCompile("(?s)" + regexp.QuoteMeta(openTag) + "(.*?)" + regexp.QuoteMeta(closeTag))
+						matches := pattern.FindAllStringSubmatch(responseText, -1)
+						
+						if len(matches) > 0 {
+							// 含有思考链标签
+							log.Printf("检测到思考链标签: %s", tag)
+							
+							// 提取思考内容
+							for _, match := range matches {
+								if len(match) > 1 {
+									reasoningForBuffer += match[1] + "\n"
+								}
+							}
+							
+							// 移除思考链内容获取清洁内容
+							contentForBuffer = pattern.ReplaceAllString(responseText, "")
+						}
+					}
 				}
 				
-				log.Printf("发送数据块: contentDiff=%d字节, reasoningDiff=%d字节",
-					len(contentDiff), len(reasoningDiff))
-				fmt.Fprintf(w, "data: %s\n\n", string(data))
-				flusher.Flush()
-			}
-			
-			if isDone {
-				log.Printf("模型指示生成完成，结束流")
-				break
+				// 如果没有检测到思考链标签，则整个内容作为普通内容
+				if reasoningForBuffer == "" {
+					contentForBuffer = responseText
+				}
+				
+				// 累积响应
+				if contentForBuffer != "" {
+					buffer.WriteString(contentForBuffer)
+				}
+				if reasoningForBuffer != "" {
+					reasoningBuffer.WriteString(reasoningForBuffer)
+				}
+				
+				// 获取当前完整内容
+				content := strings.TrimSpace(buffer.String())
+				reasoning := strings.TrimSpace(reasoningBuffer.String())
+				
+				// 只发送差异部分
+				var reasoningDiff, contentDiff string
+				if reasoning != prevReasoning {
+					if prevReasoning == "" {
+						reasoningDiff = reasoning
+					} else {
+						reasoningDiff = strings.TrimPrefix(reasoning, prevReasoning)
+					}
+					prevReasoning = reasoning
+				}
+				
+				if content != prevContent {
+					if prevContent == "" {
+						contentDiff = content
+					} else {
+						contentDiff = strings.TrimPrefix(content, prevContent)
+					}
+					prevContent = content
+				}
+				
+				if contentDiff != "" || reasoningDiff != "" {
+					// 构建流式响应块
+					chunk := createStreamChunk(id, 0, contentDiff, reasoningDiff, isDone)
+					data, err := json.Marshal(chunk)
+					if err != nil {
+						log.Printf("序列化响应块失败: %v", err)
+						sendError(w, "生成响应失败: "+err.Error(), http.StatusInternalServerError)
+						return
+					}
+					
+					log.Printf("发送数据块: contentDiff=%d字节, reasoningDiff=%d字节",
+						len(contentDiff), len(reasoningDiff))
+					fmt.Fprintf(w, "data: %s\n\n", string(data))
+					flusher.Flush()
+				}
+				
+				if isDone {
+					log.Printf("模型指示生成完成，结束流")
+					break
+				}
 			}
 		}
 	}
