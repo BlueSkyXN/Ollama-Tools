@@ -18,29 +18,29 @@ import (
 // 版本信息
 const (
 	AppName    = "OllamaBridge"
-	AppVersion = "1.0.0"
+	AppVersion = "1.0.1" // 升级版本号以反映修复
 )
 
 // 配置结构
 type Config struct {
-	Port         int
-	OllamaURL    string
-	AuthEnabled  bool
-	APIKeys      []string
+	Port          int
+	OllamaURL     string
+	AuthEnabled   bool
+	APIKeys       []string
 	ReasoningTags []string
-	Timeout      int
-	LogLevel     string
-	Verbose      bool
+	Timeout       int
+	LogLevel      string
+	Verbose       bool
 }
 
 // OpenAI 请求模型
 type OpenAIChatRequest struct {
-	Model    string          `json:"model"`
-	Messages []OpenAIMessage `json:"messages"`
-	Stream   bool            `json:"stream,omitempty"`
-	MaxTokens int            `json:"max_tokens,omitempty"`
-	Temperature float64      `json:"temperature,omitempty"`
-	User     string          `json:"user,omitempty"`
+	Model       string          `json:"model"`
+	Messages    []OpenAIMessage `json:"messages"`
+	Stream      bool            `json:"stream,omitempty"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature float64         `json:"temperature,omitempty"`
+	User        string          `json:"user,omitempty"`
 }
 
 type OpenAIMessage struct {
@@ -50,39 +50,39 @@ type OpenAIMessage struct {
 
 // Ollama 请求模型
 type OllamaGenerateRequest struct {
-	Model     string  `json:"model"`
-	Prompt    string  `json:"prompt"`
-	System    string  `json:"system,omitempty"`
-	Stream    bool    `json:"stream,omitempty"`
-	Raw       bool    `json:"raw,omitempty"`
-	Template  string  `json:"template,omitempty"`
-	Context   []int   `json:"context,omitempty"`
-	Options   map[string]interface{} `json:"options,omitempty"`
+	Model    string                 `json:"model"`
+	Prompt   string                 `json:"prompt"`
+	System   string                 `json:"system,omitempty"`
+	Stream   bool                   `json:"stream,omitempty"`
+	Raw      bool                   `json:"raw,omitempty"`
+	Template string                 `json:"template,omitempty"`
+	Context  []int                  `json:"context,omitempty"`
+	Options  map[string]interface{} `json:"options,omitempty"`
 }
 
 type OllamaChatRequest struct {
-	Model     string         `json:"model"`
-	Messages  []OllamaMessage `json:"messages"`
-	Stream    bool           `json:"stream,omitempty"`
-	Options   map[string]interface{} `json:"options,omitempty"`
+	Model    string                 `json:"model"`
+	Messages []OllamaMessage        `json:"messages"`
+	Stream   bool                   `json:"stream,omitempty"`
+	Options  map[string]interface{} `json:"options,omitempty"`
 }
 
 type OllamaMessage struct {
-	Role     string   `json:"role"`
-	Content  string   `json:"content"`
-	Images   []string `json:"images,omitempty"`
+	Role    string   `json:"role"`
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"`
 }
 
 // Ollama 响应模型
 type OllamaResponse struct {
-	Model          string  `json:"model"`
-	Response       string  `json:"response"`
-	Done           bool    `json:"done"`
-	Context        []int   `json:"context,omitempty"`
-	TotalDuration  int64   `json:"total_duration,omitempty"`
-	LoadDuration   int64   `json:"load_duration,omitempty"`
-	PromptEvalCount int    `json:"prompt_eval_count,omitempty"`
-	EvalCount      int     `json:"eval_count,omitempty"`
+	Model           string  `json:"model"`
+	Response        string  `json:"response"`
+	Done            bool    `json:"done"`
+	Context         []int   `json:"context,omitempty"`
+	TotalDuration   int64   `json:"total_duration,omitempty"`
+	LoadDuration    int64   `json:"load_duration,omitempty"`
+	PromptEvalCount int     `json:"prompt_eval_count,omitempty"`
+	EvalCount       int     `json:"eval_count,omitempty"`
 }
 
 // OpenAI 响应模型
@@ -96,15 +96,15 @@ type OpenAIChatResponse struct {
 }
 
 type OpenAIChoice struct {
-	Index        int           `json:"index"`
+	Index        int               `json:"index"`
 	Message      OpenAIChatMessage `json:"message"`
-	FinishReason string        `json:"finish_reason"`
+	FinishReason string            `json:"finish_reason"`
 }
 
 type OpenAIChatMessage struct {
-	Role              string `json:"role"`
-	Content           string `json:"content"`
-	ReasoningContent  string `json:"reasoning_content,omitempty"`
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type OpenAIUsage struct {
@@ -134,9 +134,19 @@ type ChunkDelta struct {
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
+// OpenAI 错误响应模型
+type OpenAIError struct {
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Param   string `json:"param,omitempty"`
+		Code    string `json:"code,omitempty"`
+	} `json:"error"`
+}
+
 // OpenAI 模型列表响应
 type OpenAIModelsList struct {
-	Object string       `json:"object"`
+	Object string        `json:"object"`
 	Data   []OpenAIModel `json:"data"`
 }
 
@@ -212,12 +222,23 @@ func authMiddleware(next http.Handler, config *Config) http.Handler {
 		
 		apiKey := extractAPIKey(r)
 		if !isValidAPIKey(apiKey, config.APIKeys) {
-			http.Error(w, "未授权: 无效的API密钥", http.StatusUnauthorized)
+			sendError(w, "未授权: 无效的API密钥", http.StatusUnauthorized)
 			return
 		}
 		
 		next.ServeHTTP(w, r)
 	})
+}
+
+// 发送OpenAI格式的错误响应
+func sendError(w http.ResponseWriter, message string, status int) {
+	var openAIErr OpenAIError
+	openAIErr.Error.Message = message
+	openAIErr.Error.Type = "server_error"
+	
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(openAIErr)
 }
 
 // 提取思考链内容
@@ -320,10 +341,12 @@ func generateResponseID() string {
 	return fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano()/int64(time.Millisecond))
 }
 
-// 估算token数量
+// 估算token数量 - 改进版
 func estimateTokenCount(charCount int) int {
-	// 粗略估计，假设每4个字符约为1个token
-	return charCount / 4
+	// 更复杂的估算方法
+	// 基于一般经验，英文约为1.3字符/token，中文约为1.1字符/token
+	// 这里取保守估计
+	return int(float64(charCount) / 3.5)
 }
 
 // 将OpenAI消息转换为Ollama提示
@@ -351,9 +374,8 @@ func convertToOllamaGenerate(req *OpenAIChatRequest) (*OllamaGenerateRequest, er
 	prompt, systemPrompt := openAIMessagesToOllamaPrompt(req.Messages)
 	
 	options := make(map[string]interface{})
-	if req.Temperature > 0 {
-		options["temperature"] = req.Temperature
-	}
+	// 无论是否为默认值，总是设置温度
+	options["temperature"] = req.Temperature
 	
 	if req.MaxTokens > 0 {
 		options["num_predict"] = req.MaxTokens
@@ -380,9 +402,8 @@ func convertToOllamaChat(req *OpenAIChatRequest) (*OllamaChatRequest, error) {
 	}
 	
 	options := make(map[string]interface{})
-	if req.Temperature > 0 {
-		options["temperature"] = req.Temperature
-	}
+	// 无论是否为默认值，总是设置温度
+	options["temperature"] = req.Temperature
 	
 	if req.MaxTokens > 0 {
 		options["num_predict"] = req.MaxTokens
@@ -425,9 +446,14 @@ func getOllamaModels(ollamaURL string) ([]string, error) {
 // 模型列表处理器
 func modelsHandler(config *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if config.Verbose {
+			log.Printf("请求模型列表")
+		}
+		
 		models, err := getOllamaModels(config.OllamaURL)
 		if err != nil {
-			http.Error(w, "无法获取模型列表: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("获取模型列表失败: %v", err)
+			sendError(w, "无法获取模型列表: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		
@@ -439,7 +465,7 @@ func modelsHandler(config *Config) http.HandlerFunc {
 				ID:      model,
 				Object:  "model",
 				Created: now,
-				OwnedBy: "reasonbridge",
+				OwnedBy: "ollamabridge",
 			})
 		}
 		
@@ -450,6 +476,10 @@ func modelsHandler(config *Config) http.HandlerFunc {
 		
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(response)
+		
+		if config.Verbose {
+			log.Printf("返回模型列表: %d个模型", len(models))
+		}
 	}
 }
 
@@ -461,7 +491,7 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 	
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "流式响应不支持", http.StatusInternalServerError)
+		sendError(w, "流式响应不支持", http.StatusInternalServerError)
 		return
 	}
 	
@@ -478,9 +508,24 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 			continue
 		}
 		
+		// 检查是否为特殊非JSON消息
+		if strings.HasPrefix(line, "data:") {
+			// 可能是来自兼容端点的SSE消息
+			line = strings.TrimPrefix(line, "data:")
+			line = strings.TrimSpace(line)
+		}
+		
+		// 特殊处理[DONE]消息
+		if line == "[DONE]" {
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+		
 		var ollamaResp OllamaResponse
 		if err := json.Unmarshal([]byte(line), &ollamaResp); err != nil {
-			log.Printf("解析Ollama响应失败: %v", err)
+			// 如果解析失败，记录错误并尝试继续
+			log.Printf("解析Ollama响应失败 (尝试继续): %v, 原始数据: %s", err, line)
 			continue
 		}
 		
@@ -514,7 +559,12 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 		
 		// 构建流式响应块
 		chunk := createStreamChunk(id, 0, contentDiff, reasoningDiff, ollamaResp.Done)
-		data, _ := json.Marshal(chunk)
+		data, err := json.Marshal(chunk)
+		if err != nil {
+			log.Printf("序列化响应块失败: %v", err)
+			sendError(w, "生成响应失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		
 		fmt.Fprintf(w, "data: %s\n\n", string(data))
 		flusher.Flush()
@@ -522,6 +572,12 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 		if ollamaResp.Done {
 			break
 		}
+	}
+	
+	// 检查扫描器是否因错误而退出
+	if err := scanner.Err(); err != nil {
+		log.Printf("读取Ollama响应流时发生错误: %v", err)
+		// 由于我们已经开始发送响应，只能记录错误，不能发送HTTP错误
 	}
 	
 	// 发送结束标记
@@ -534,13 +590,15 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config 
 	var buffer bytes.Buffer
 	_, err := io.Copy(&buffer, resp.Body)
 	if err != nil {
-		http.Error(w, "读取Ollama响应失败: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("读取Ollama响应失败: %v", err)
+		sendError(w, "读取Ollama响应失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	
 	var ollamaResp OllamaResponse
 	if err := json.Unmarshal(buffer.Bytes(), &ollamaResp); err != nil {
-		http.Error(w, "解析Ollama响应失败: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("解析Ollama响应失败: %v, 原始响应: %s", err, buffer.String())
+		sendError(w, "解析Ollama响应失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	
@@ -565,17 +623,41 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config 
 // 聊天完成处理器
 func chatCompletionsHandler(config *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 记录请求
+		if config.Verbose {
+			log.Printf("接收到聊天完成请求: %s", r.URL.Path)
+		}
+		
 		// 只处理POST请求
 		if r.Method != http.MethodPost {
-			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+			sendError(w, "方法不允许", http.StatusMethodNotAllowed)
 			return
 		}
 		
 		// 解析请求
 		var openAIReq OpenAIChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&openAIReq); err != nil {
-			http.Error(w, "无效的请求JSON: "+err.Error(), http.StatusBadRequest)
+			log.Printf("解析请求失败: %v", err)
+			sendError(w, "无效的请求JSON: "+err.Error(), http.StatusBadRequest)
 			return
+		}
+		
+		// 验证请求参数
+		if openAIReq.Model == "" {
+			sendError(w, "缺少必要参数: model", http.StatusBadRequest)
+			return
+		}
+		
+		if len(openAIReq.Messages) == 0 {
+			sendError(w, "缺少必要参数: messages", http.StatusBadRequest)
+			return
+		}
+		
+		// 温度值检查
+		if openAIReq.Temperature < 0 {
+			openAIReq.Temperature = 0
+		} else if openAIReq.Temperature > 2 {
+			openAIReq.Temperature = 2
 		}
 		
 		// 生成响应ID
@@ -596,35 +678,19 @@ func chatCompletionsHandler(config *Config) http.HandlerFunc {
 			ollamaReqBody, err = json.Marshal(cleanReq)
 		} else {
 			// 使用Ollama原生API
-			if len(openAIReq.Messages) == 0 {
-				http.Error(w, "缺少消息", http.StatusBadRequest)
+			ollamaEndpoint = "/api/chat"
+			ollamaReq, err := convertToOllamaChat(&openAIReq)
+			if err != nil {
+				log.Printf("转换请求失败: %v", err)
+				sendError(w, "转换请求失败: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
-			
-			// 选择端点（generate或chat）
-			useChat := true // 默认使用chat端点
-			
-			if useChat {
-				ollamaEndpoint = "/api/chat"
-				ollamaReq, err := convertToOllamaChat(&openAIReq)
-				if err != nil {
-					http.Error(w, "转换请求失败: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				ollamaReqBody, err = json.Marshal(ollamaReq)
-			} else {
-				ollamaEndpoint = "/api/generate"
-				ollamaReq, err := convertToOllamaGenerate(&openAIReq)
-				if err != nil {
-					http.Error(w, "转换请求失败: "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-				ollamaReqBody, err = json.Marshal(ollamaReq)
-			}
+			ollamaReqBody, err = json.Marshal(ollamaReq)
 		}
 		
 		if err != nil {
-			http.Error(w, "构建请求失败: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("构建请求失败: %v", err)
+			sendError(w, "构建请求失败: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		
@@ -632,7 +698,8 @@ func chatCompletionsHandler(config *Config) http.HandlerFunc {
 		ollamaURL := config.OllamaURL + ollamaEndpoint
 		req, err := http.NewRequest(http.MethodPost, ollamaURL, bytes.NewBuffer(ollamaReqBody))
 		if err != nil {
-			http.Error(w, "创建请求失败: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("创建请求失败: %v", err)
+			sendError(w, "创建请求失败: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		
@@ -644,9 +711,14 @@ func chatCompletionsHandler(config *Config) http.HandlerFunc {
 		}
 		
 		// 发送请求到Ollama
+		if config.Verbose {
+			log.Printf("发送请求到Ollama: %s", ollamaURL)
+		}
+		
 		resp, err := client.Do(req)
 		if err != nil {
-			http.Error(w, "请求Ollama失败: "+err.Error(), http.StatusInternalServerError)
+			log.Printf("请求Ollama失败: %v", err)
+			sendError(w, "请求Ollama失败: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer resp.Body.Close()
@@ -655,7 +727,9 @@ func chatCompletionsHandler(config *Config) http.HandlerFunc {
 		if resp.StatusCode != http.StatusOK {
 			var buffer bytes.Buffer
 			io.Copy(&buffer, resp.Body)
-			http.Error(w, fmt.Sprintf("Ollama返回错误: %s - %s", resp.Status, buffer.String()), resp.StatusCode)
+			errMsg := fmt.Sprintf("Ollama返回错误: %s - %s", resp.Status, buffer.String())
+			log.Printf(errMsg)
+			sendError(w, errMsg, resp.StatusCode)
 			return
 		}
 		
@@ -665,33 +739,49 @@ func chatCompletionsHandler(config *Config) http.HandlerFunc {
 		} else {
 			handleNonStreamResponse(w, resp, config, responseID, openAIReq.Model)
 		}
+		
+		if config.Verbose {
+			log.Printf("成功处理请求: %s", responseID)
+		}
 	}
 }
 
 // 文本完成处理器（重定向到聊天完成）
 func completionsHandler(config *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if config.Verbose {
+			log.Printf("接收到文本完成请求")
+		}
+		
 		if r.Method != http.MethodPost {
-			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+			sendError(w, "方法不允许", http.StatusMethodNotAllowed)
 			return
 		}
 		
 		// 读取原始body
 		var body map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "无效的请求JSON: "+err.Error(), http.StatusBadRequest)
+			log.Printf("解析请求失败: %v", err)
+			sendError(w, "无效的请求JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		
 		// 转换为chat格式
 		prompt, ok := body["prompt"]
 		if !ok {
-			http.Error(w, "缺少prompt字段", http.StatusBadRequest)
+			sendError(w, "缺少prompt字段", http.StatusBadRequest)
+			return
+		}
+		
+		// 确保model存在
+		model, ok := body["model"].(string)
+		if !ok || model == "" {
+			sendError(w, "缺少或无效的model字段", http.StatusBadRequest)
 			return
 		}
 		
 		chatReq := OpenAIChatRequest{
-			Model: body["model"].(string),
+			Model: model,
 			Messages: []OpenAIMessage{
 				{
 					Role:    "user",
@@ -702,24 +792,44 @@ func completionsHandler(config *Config) http.HandlerFunc {
 		
 		// 复制其他字段
 		if temp, ok := body["temperature"]; ok {
-			chatReq.Temperature, _ = temp.(float64)
+			if tempFloat, ok := temp.(float64); ok {
+				chatReq.Temperature = tempFloat
+			}
 		}
 		
 		if maxTokens, ok := body["max_tokens"]; ok {
-			chatReq.MaxTokens, _ = maxTokens.(int)
+			if maxTokensFloat, ok := maxTokens.(float64); ok {
+				chatReq.MaxTokens = int(maxTokensFloat)
+			}
 		}
 		
 		if stream, ok := body["stream"]; ok {
-			chatReq.Stream, _ = stream.(bool)
+			if streamBool, ok := stream.(bool); ok {
+				chatReq.Stream = streamBool
+			}
 		}
 		
 		if user, ok := body["user"]; ok {
-			chatReq.User, _ = user.(string)
+			if userStr, ok := user.(string); ok {
+				chatReq.User = userStr
+			}
 		}
 		
 		// 创建新的请求
-		chatBody, _ := json.Marshal(chatReq)
-		newReq, _ := http.NewRequest(http.MethodPost, r.URL.Path, bytes.NewBuffer(chatBody))
+		chatBody, err := json.Marshal(chatReq)
+		if err != nil {
+			log.Printf("构建请求失败: %v", err)
+			sendError(w, "构建请求失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		
+		newReq, err := http.NewRequest(http.MethodPost, r.URL.Path, bytes.NewBuffer(chatBody))
+		if err != nil {
+			log.Printf("创建请求失败: %v", err)
+			sendError(w, "创建请求失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		
 		newReq.Header = r.Header
 		
 		// 调用聊天完成处理器
@@ -733,18 +843,31 @@ func healthHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"status": "ok",
+			"status":  "ok",
 			"version": AppVersion,
 		})
 	}
 }
 
 func main() {
+	// 配置日志格式
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	
 	// 输出欢迎信息
 	fmt.Printf("%s v%s - Ollama到OpenAI/DeepSeek API转换器\n", AppName, AppVersion)
 	
 	// 初始化配置
 	config := initConfig()
+	
+	// 打印配置详情
+	if config.Verbose {
+		log.Printf("配置信息:")
+		log.Printf("  端口: %d", config.Port)
+		log.Printf("  Ollama地址: %s", config.OllamaURL)
+		log.Printf("  认证: %v", config.AuthEnabled)
+		log.Printf("  超时: %d秒", config.Timeout)
+		log.Printf("  思考链标签: %v", config.ReasoningTags)
+	}
 	
 	// 创建路由器
 	mux := http.NewServeMux()
