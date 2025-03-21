@@ -1,63 +1,124 @@
+# .github/workflows/build.yml
 name: Build OllamaBridge
 
 on:
   push:
     branches:
-      - '*'   # 匹配所有分支
+      - '*'
   workflow_dispatch:  # 支持手动触发
 
 jobs:
+  setup:
+    name: Setup Build Environment
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        
+      - name: Set version
+        id: set-version
+        run: |
+          echo "version=$(date +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+
   build:
-    name: Build OllamaBridge
+    name: Build for ${{ matrix.os }}-${{ matrix.arch }}
+    needs: setup
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false  # 允许部分失败不影响其他构建
       matrix:
-        goos: [linux, windows, darwin]
-        goarch: [amd64, arm64]
-        exclude:
-          # 排除一些不常用的组合
-          - goos: windows
+        include:
+          - os: windows
+            arch: amd64
+            ext: .exe
+            goos: windows
+            goarch: amd64
+          - os: windows
+            arch: 386
+            ext: .exe
+            goos: windows
+            goarch: 386
+          - os: linux
+            arch: amd64
+            ext: ""
+            goos: linux
+            goarch: amd64
+          - os: linux
+            arch: 386
+            ext: ""
+            goos: linux
+            goarch: 386
+          - os: linux
+            arch: arm64
+            ext: ""
+            goos: linux
             goarch: arm64
-
+          - os: darwin
+            arch: amd64
+            ext: ""
+            goos: darwin
+            goarch: amd64
+          - os: darwin
+            arch: arm64
+            ext: ""
+            goos: darwin
+            goarch: arm64
     steps:
-      - name: Checkout code
+      - name: Check out code
         uses: actions/checkout@v4
-
+        
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'
+          check-latest: true
           cache: true
-
-      - name: Build
+      
+      - name: Build for ${{ matrix.os }}-${{ matrix.arch }}
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.setup.outputs.version }}
         run: |
-          # 设置输出文件名称
-          OUTPUT="OllamaBridge"
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            OUTPUT="${OUTPUT}.exe"
+          BINARY_NAME="OllamaBridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}"
+          go build -ldflags "-X main.AppVersion=$VERSION" -o "$BINARY_NAME" ./OllamaBridge.go
+          
+          if [ "${{ matrix.os }}" != "windows" ]; then
+            chmod +x "$BINARY_NAME"
           fi
           
-          # 添加OS和架构到文件名
-          FILENAME="${OUTPUT}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          if [ "${{ matrix.goos }}" = "windows" ]; then
-            FILENAME="${FILENAME}.exe"
-          fi
-          
-          # 编译
-          echo "Building for ${{ matrix.goos }}-${{ matrix.goarch }}..."
-          go build -v -o "${FILENAME}" -ldflags="-s -w" ./OllamaBridge.go
-          
-          # 为Linux和macOS添加执行权限
-          if [ "${{ matrix.goos }}" != "windows" ]; then
-            chmod +x "${FILENAME}"
-          fi
-
-      - name: Upload artifacts
+          # 列出文件以便调试
+          ls -la
+      
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OllamaBridge-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: OllamaBridge-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goos == 'windows' && '.exe' || '' }}
-          retention-days: 7
+          name: OllamaBridge-${{ matrix.os }}-${{ matrix.arch }}-${{ needs.setup.outputs.version }}
+          path: OllamaBridge-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          retention-days: 90
+
+  package-all:
+    name: Package All Artifacts
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          pattern: OllamaBridge-*-${{ needs.setup.outputs.version }}
+          merge-multiple: true
+      
+      - name: Create Release Package
+        run: |
+          cd binaries
+          zip -r ../OllamaBridge-all-platforms-${{ needs.setup.outputs.version }}.zip .
+      
+      - name: Upload Combined Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: OllamaBridge-all-platforms-${{ needs.setup.outputs.version }}
+          path: OllamaBridge-all-platforms-${{ needs.setup.outputs.version }}.zip
+          retention-days: 90
