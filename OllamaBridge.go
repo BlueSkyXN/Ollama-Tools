@@ -654,7 +654,63 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config 
 	rawResponse := buffer.String()
 	log.Printf("收到非流式响应: %s", rawResponse[:min(len(rawResponse), 200)]) // 只记录前200个字符
 	
-	// 首先尝试标准Ollama格式
+	// 直接尝试解析为OpenAI兼容格式，这是Ollama在v1/chat/completions端点返回的格式
+	var openAIFormat struct {
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Created int64  `json:"created"` 
+		Model   string `json:"model"`
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	
+	var responseContent string
+	var responseRole string
+	
+	if err := json.Unmarshal(buffer.Bytes(), &openAIFormat); err == nil && len(openAIFormat.Choices) > 0 {
+		log.Printf("成功解析为OpenAI兼容格式")
+		responseContent = openAIFormat.Choices[0].Message.Content
+		responseRole = openAIFormat.Choices[0].Message.Role
+		log.Printf("提取到内容: 角色=%s, 内容前100个字符=%s", 
+			responseRole, responseContent[:min(len(responseContent), 100)])
+		
+		// 直接使用OpenAI格式响应
+		response := &OpenAIChatResponse{
+			ID:      id,
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   model,
+			Choices: []OpenAIChoice{
+				{
+					Index: 0,
+					Message: OpenAIChatMessage{
+						Role:    responseRole,
+						Content: responseContent,
+					},
+					FinishReason: "stop",
+				},
+			},
+			Usage: OpenAIUsage{
+				PromptTokens:     estimateTokenCount(len(rawResponse) - len(responseContent)),
+				CompletionTokens: estimateTokenCount(len(responseContent)),
+				TotalTokens:      estimateTokenCount(len(rawResponse)),
+			},
+		}
+		
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+		log.Printf("成功返回OpenAI兼容格式响应")
+		return
+	}
+	
+	// 如果不是OpenAI格式，尝试标准Ollama格式
+	log.Printf("不是OpenAI格式，尝试解析为Ollama标准格式")
 	var ollamaResp OllamaResponse
 	if err := json.Unmarshal(buffer.Bytes(), &ollamaResp); err != nil {
 		log.Printf("标准格式解析失败: %v, 尝试备用格式", err)
@@ -668,28 +724,23 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config 
 			ollamaResp.Response = alternateFormat.Message
 			ollamaResp.Done = true
 		} else {
-			// 还可以尝试OpenAI兼容的格式
-			var openAIFormat struct {
-				Choices []struct {
-					Message struct {
-						Content string `json:"content"`
-					} `json:"message"`
-				} `json:"choices"`
-			}
-			if openAIErr := json.Unmarshal(buffer.Bytes(), &openAIFormat); openAIErr == nil && 
-				len(openAIFormat.Choices) > 0 {
-				log.Printf("使用OpenAI兼容格式解析成功")
-				ollamaResp.Response = openAIFormat.Choices[0].Message.Content
+			// 最后尝试作为纯文本处理
+			if !strings.HasPrefix(rawResponse, "{") {
+				log.Printf("作为纯文本处理响应")
+				ollamaResp.Response = rawResponse
 				ollamaResp.Done = true
 			} else {
-				// 最后尝试作为纯文本处理
-				if !strings.HasPrefix(rawResponse, "{") {
-					log.Printf("作为纯文本处理响应")
-					ollamaResp.Response = rawResponse
+				// 如果实在解析不了，直接尝试从raw response中提取content
+				contentMatch := regexp.MustCompile(`"content":"(.*?)"`).FindStringSubmatch(rawResponse)
+				if len(contentMatch) > 1 {
+					log.Printf("使用正则表达式提取内容")
+					ollamaResp.Response = contentMatch[1]
 					ollamaResp.Done = true
 				} else {
-					log.Printf("所有解析方法均失败，返回错误")
-					sendError(w, "解析Ollama响应失败: 不支持的响应格式", http.StatusInternalServerError)
+					log.Printf("所有解析方法均失败，返回原始响应")
+					// 直接返回原始响应，不再尝试解析
+					w.Header().Set("Content-Type", "application/json")
+					w.Write(buffer.Bytes())
 					return
 				}
 			}
@@ -697,8 +748,10 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config 
 	}
 	
 	if ollamaResp.Response == "" {
-		log.Printf("解析成功但响应为空")
-		sendError(w, "Ollama返回了空响应", http.StatusInternalServerError)
+		log.Printf("解析成功但响应为空，直接返回原始响应")
+		// 直接返回原始响应
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(buffer.Bytes())
 		return
 	}
 	
