@@ -544,34 +544,60 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 		var responseText string
 		var isDone bool
 		
-		// 首先尝试标准Ollama格式
-		var ollamaResp OllamaResponse
-		if err := json.Unmarshal([]byte(line), &ollamaResp); err != nil {
-			// 尝试解析为其他可能的格式
-			var alternateFormat struct {
-				Message string `json:"message"`
-				Stop    bool   `json:"stop"`
-			}
-			if altErr := json.Unmarshal([]byte(line), &alternateFormat); altErr == nil {
-				responseText = alternateFormat.Message
-				isDone = alternateFormat.Stop
-				log.Printf("使用备用格式解析成功: message=%s, stop=%v", 
+		// 首先尝试OpenAI流式格式
+		var openAIChunk struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			Model   string `json:"model"`
+			Choices []struct {
+				Index int `json:"index"`
+				Delta struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		
+		if err := json.Unmarshal([]byte(line), &openAIChunk); err == nil && 
+			len(openAIChunk.Choices) > 0 {
+			// 是OpenAI格式
+			responseText = openAIChunk.Choices[0].Delta.Content
+			isDone = openAIChunk.Choices[0].FinishReason != ""
+			log.Printf("OpenAI格式解析成功: content=%s, done=%v", 
+				responseText, isDone)
+		} else {
+			// 尝试标准Ollama格式
+			var ollamaResp OllamaResponse
+			if err := json.Unmarshal([]byte(line), &ollamaResp); err == nil {
+				responseText = ollamaResp.Response
+				isDone = ollamaResp.Done
+				log.Printf("标准格式解析成功: response=%s, done=%v", 
 					responseText[:min(len(responseText), 30)], isDone)
 			} else {
-				// 尝试作为纯文本处理
-				if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
-					log.Printf("无法解析JSON，但似乎是JSON格式: %v", err)
+				// 尝试解析为其他可能的格式
+				var alternateFormat struct {
+					Message string `json:"message"`
+					Stop    bool   `json:"stop"`
+				}
+				if altErr := json.Unmarshal([]byte(line), &alternateFormat); altErr == nil {
+					responseText = alternateFormat.Message
+					isDone = alternateFormat.Stop
+					log.Printf("使用备用格式解析成功: message=%s, stop=%v", 
+						responseText[:min(len(responseText), 30)], isDone)
 				} else {
-					// 可能是纯文本响应
-					responseText = line
-					log.Printf("将行作为纯文本处理: %s", responseText[:min(len(responseText), 50)])
+					// 尝试作为纯文本处理
+					if !strings.HasPrefix(line, "{") {
+						// 可能是纯文本响应
+						responseText = line
+						log.Printf("将行作为纯文本处理: %s", responseText[:min(len(responseText), 50)])
+					} else {
+						log.Printf("无法解析JSON，但似乎是JSON格式，跳过此行")
+						continue
+					}
 				}
 			}
-		} else {
-			responseText = ollamaResp.Response
-			isDone = ollamaResp.Done
-			log.Printf("标准格式解析成功: response=%s, done=%v", 
-				responseText[:min(len(responseText), 30)], isDone)
 		}
 		
 		// 如果提取到响应文本，则处理它
