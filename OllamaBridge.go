@@ -15,6 +15,14 @@ import (
 	"time"
 )
 
+// 取最小值的辅助函数
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // 版本信息
 const (
 	AppName    = "OllamaBridge"
@@ -489,6 +497,8 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	
+	log.Printf("开始处理流式响应...")
+	
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		sendError(w, "流式响应不支持", http.StatusInternalServerError)
@@ -496,6 +506,10 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 	}
 	
 	scanner := bufio.NewScanner(resp.Body)
+	// 设置更大的缓冲区以处理长行
+	const maxScanTokenSize = 1024 * 1024 // 1MB
+	scanBuf := make([]byte, maxScanTokenSize)
+	scanner.Buffer(scanBuf, maxScanTokenSize)
 	
 	// 用于收集部分响应
 	var buffer strings.Builder
@@ -508,69 +522,108 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 			continue
 		}
 		
+		log.Printf("收到原始行: %s", line[:min(len(line), 100)]) // 只打印前100个字符避免日志过大
+		
 		// 检查是否为特殊非JSON消息
 		if strings.HasPrefix(line, "data:") {
 			// 可能是来自兼容端点的SSE消息
 			line = strings.TrimPrefix(line, "data:")
 			line = strings.TrimSpace(line)
+			log.Printf("处理SSE消息，提取后: %s", line[:min(len(line), 100)])
 		}
 		
 		// 特殊处理[DONE]消息
 		if line == "[DONE]" {
+			log.Printf("收到[DONE]消息，结束流式响应")
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			return
 		}
 		
+		// 尝试适应不同的响应格式
+		var responseText string
+		var isDone bool
+		
+		// 首先尝试标准Ollama格式
 		var ollamaResp OllamaResponse
 		if err := json.Unmarshal([]byte(line), &ollamaResp); err != nil {
-			// 如果解析失败，记录错误并尝试继续
-			log.Printf("解析Ollama响应失败 (尝试继续): %v, 原始数据: %s", err, line)
-			continue
-		}
-		
-		// 累积响应
-		buffer.WriteString(ollamaResp.Response)
-		fullResponse := buffer.String()
-		
-		// 提取思考链
-		reasoning := extractReasoning(fullResponse, config.ReasoningTags)
-		content := removeReasoningFromContent(fullResponse, config.ReasoningTags)
-		
-		// 只发送差异部分
-		var reasoningDiff, contentDiff string
-		if reasoning != prevReasoning {
-			if prevReasoning == "" {
-				reasoningDiff = reasoning
-			} else {
-				reasoningDiff = strings.TrimPrefix(reasoning, prevReasoning)
+			// 尝试解析为其他可能的格式
+			var alternateFormat struct {
+				Message string `json:"message"`
+				Stop    bool   `json:"stop"`
 			}
-			prevReasoning = reasoning
-		}
-		
-		if content != prevContent {
-			if prevContent == "" {
-				contentDiff = content
+			if altErr := json.Unmarshal([]byte(line), &alternateFormat); altErr == nil {
+				responseText = alternateFormat.Message
+				isDone = alternateFormat.Stop
+				log.Printf("使用备用格式解析成功: message=%s, stop=%v", 
+					responseText[:min(len(responseText), 30)], isDone)
 			} else {
-				contentDiff = strings.TrimPrefix(content, prevContent)
+				// 尝试作为纯文本处理
+				if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+					log.Printf("无法解析JSON，但似乎是JSON格式: %v", err)
+				} else {
+					// 可能是纯文本响应
+					responseText = line
+					log.Printf("将行作为纯文本处理: %s", responseText[:min(len(responseText), 50)])
+				}
 			}
-			prevContent = content
+		} else {
+			responseText = ollamaResp.Response
+			isDone = ollamaResp.Done
+			log.Printf("标准格式解析成功: response=%s, done=%v", 
+				responseText[:min(len(responseText), 30)], isDone)
 		}
 		
-		// 构建流式响应块
-		chunk := createStreamChunk(id, 0, contentDiff, reasoningDiff, ollamaResp.Done)
-		data, err := json.Marshal(chunk)
-		if err != nil {
-			log.Printf("序列化响应块失败: %v", err)
-			sendError(w, "生成响应失败: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-		
-		fmt.Fprintf(w, "data: %s\n\n", string(data))
-		flusher.Flush()
-		
-		if ollamaResp.Done {
-			break
+		// 如果提取到响应文本，则处理它
+		if responseText != "" {
+			// 累积响应
+			buffer.WriteString(responseText)
+			fullResponse := buffer.String()
+			
+			// 提取思考链
+			reasoning := extractReasoning(fullResponse, config.ReasoningTags)
+			content := removeReasoningFromContent(fullResponse, config.ReasoningTags)
+			
+			// 只发送差异部分
+			var reasoningDiff, contentDiff string
+			if reasoning != prevReasoning {
+				if prevReasoning == "" {
+					reasoningDiff = reasoning
+				} else {
+					reasoningDiff = strings.TrimPrefix(reasoning, prevReasoning)
+				}
+				prevReasoning = reasoning
+			}
+			
+			if content != prevContent {
+				if prevContent == "" {
+					contentDiff = content
+				} else {
+					contentDiff = strings.TrimPrefix(content, prevContent)
+				}
+				prevContent = content
+			}
+			
+			if contentDiff != "" || reasoningDiff != "" {
+				// 构建流式响应块
+				chunk := createStreamChunk(id, 0, contentDiff, reasoningDiff, isDone)
+				data, err := json.Marshal(chunk)
+				if err != nil {
+					log.Printf("序列化响应块失败: %v", err)
+					sendError(w, "生成响应失败: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
+				
+				log.Printf("发送数据块: contentDiff=%d字节, reasoningDiff=%d字节",
+					len(contentDiff), len(reasoningDiff))
+				fmt.Fprintf(w, "data: %s\n\n", string(data))
+				flusher.Flush()
+			}
+			
+			if isDone {
+				log.Printf("模型指示生成完成，结束流")
+				break
+			}
 		}
 	}
 	
@@ -581,12 +634,15 @@ func handleStreamResponse(w http.ResponseWriter, resp *http.Response, config *Co
 	}
 	
 	// 发送结束标记
+	log.Printf("发送结束标记[DONE]")
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }
 
 // 处理非流式响应
 func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config *Config, id string, model string) {
+	log.Printf("开始处理非流式响应...")
+	
 	var buffer bytes.Buffer
 	_, err := io.Copy(&buffer, resp.Body)
 	if err != nil {
@@ -595,16 +651,77 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config 
 		return
 	}
 	
+	rawResponse := buffer.String()
+	log.Printf("收到非流式响应: %s", rawResponse[:min(len(rawResponse), 200)]) // 只记录前200个字符
+	
+	// 首先尝试标准Ollama格式
 	var ollamaResp OllamaResponse
 	if err := json.Unmarshal(buffer.Bytes(), &ollamaResp); err != nil {
-		log.Printf("解析Ollama响应失败: %v, 原始响应: %s", err, buffer.String())
-		sendError(w, "解析Ollama响应失败: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("标准格式解析失败: %v, 尝试备用格式", err)
+		
+		// 尝试解析为其他可能的格式
+		var alternateFormat struct {
+			Message string `json:"message"`
+		}
+		if altErr := json.Unmarshal(buffer.Bytes(), &alternateFormat); altErr == nil {
+			log.Printf("使用备用格式解析成功")
+			ollamaResp.Response = alternateFormat.Message
+			ollamaResp.Done = true
+		} else {
+			// 还可以尝试OpenAI兼容的格式
+			var openAIFormat struct {
+				Choices []struct {
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"choices"`
+			}
+			if openAIErr := json.Unmarshal(buffer.Bytes(), &openAIFormat); openAIErr == nil && 
+				len(openAIFormat.Choices) > 0 {
+				log.Printf("使用OpenAI兼容格式解析成功")
+				ollamaResp.Response = openAIFormat.Choices[0].Message.Content
+				ollamaResp.Done = true
+			} else {
+				// 最后尝试作为纯文本处理
+				if !strings.HasPrefix(rawResponse, "{") {
+					log.Printf("作为纯文本处理响应")
+					ollamaResp.Response = rawResponse
+					ollamaResp.Done = true
+				} else {
+					log.Printf("所有解析方法均失败，返回错误")
+					sendError(w, "解析Ollama响应失败: 不支持的响应格式", http.StatusInternalServerError)
+					return
+				}
+			}
+		}
+	}
+	
+	if ollamaResp.Response == "" {
+		log.Printf("解析成功但响应为空")
+		sendError(w, "Ollama返回了空响应", http.StatusInternalServerError)
 		return
 	}
+	
+	log.Printf("提取到响应内容: %s", ollamaResp.Response[:min(len(ollamaResp.Response), 100)])
 	
 	// 提取思考链
 	reasoning := extractReasoning(ollamaResp.Response, config.ReasoningTags)
 	content := removeReasoningFromContent(ollamaResp.Response, config.ReasoningTags)
+	
+	// 构造token数量（如果未提供则估算）
+	promptTokens := ollamaResp.PromptEvalCount
+	completionTokens := ollamaResp.EvalCount
+	
+	if promptTokens == 0 {
+		// 估算token数量
+		for _, msg := range content {
+			promptTokens += estimateTokenCount(len(msg))
+		}
+	}
+	
+	if completionTokens == 0 {
+		completionTokens = estimateTokenCount(len(content))
+	}
 	
 	// 创建OpenAI格式响应
 	response := createOpenAIResponse(
@@ -612,12 +729,20 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config 
 		model,
 		content,
 		reasoning,
-		ollamaResp.PromptEvalCount,
-		ollamaResp.EvalCount,
+		promptTokens,
+		completionTokens,
 	)
 	
+	responseData, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("序列化响应失败: %v", err)
+		sendError(w, "生成响应失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	
+	log.Printf("成功生成响应")
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	w.Write(responseData)
 }
 
 // 聊天完成处理器
