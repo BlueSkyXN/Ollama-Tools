@@ -713,13 +713,12 @@ func handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, config 
 	completionTokens := ollamaResp.EvalCount
 	
 	if promptTokens == 0 {
-		// 估算token数量
-		for _, msg := range content {
-			promptTokens += estimateTokenCount(len(msg))
-		}
+		// 估算提示token数量
+		promptTokens = estimateTokenCount(len(ollamaResp.Response) - len(content))
 	}
 	
 	if completionTokens == 0 {
+		// 估算完成token数量
 		completionTokens = estimateTokenCount(len(content))
 	}
 	
